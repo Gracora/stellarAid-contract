@@ -15,7 +15,8 @@ pub mod views;
 use types::{CampaignData, CampaignInitializedEvent, CampaignStatus, CampaignStatusResponse, DonorRecord, Error, MilestoneData, MilestoneStatus, StellarAsset, AssetInfo};
 use soroban_sdk::{contract, contractimpl, token, Address, Env, String, Vec, BytesN};
 use types::{CampaignData, CampaignInitializedEvent, CampaignStatus, DonorRecord, Error, MilestoneData, MilestoneStatus, StellarAsset, AssetInfo};
-use storage::{get_campaign, set_campaign, get_milestone, set_milestone, get_donor, set_donor, get_total_raised as storage_get_total_raised, storage_set_total_raised, increment_donor_asset_donation, get_donor_asset_donation, is_frozen, set_frozen};
+use storage::{get_campaign, set_campaign, get_milestone, set_milestone, get_donor, set_donor, get_total_raised as storage_get_total_raised, storage_set_total_raised, increment_donor_asset_donation, get_donor_asset_donation, is_frozen, set_frozen, storage_get_asset_raised, storage_increment_asset_raised, get_campaign_or_panic, acquire_lock, release_lock};
+
 
 pub const VERSION: u32 = 1;
 
@@ -179,6 +180,9 @@ impl CampaignContract {
         let asset_address = get_token_address_for_asset(&env, &asset, &campaign);
         increment_donor_asset_donation(&env, &donor, &asset_address, amount);
 
+        // Update the total raised for this specific asset
+        storage_increment_asset_raised(&env, &asset_address, amount);
+
         // Update donor record
         let mut donor_record = get_donor(&env, &donor).unwrap_or(DonorRecord {
             donor: donor.clone(),
@@ -225,6 +229,25 @@ impl CampaignContract {
     /// No auth required. Returns 0 if no donations yet.
     pub fn get_total_raised(env: Env) -> i128 {
         storage_get_total_raised(&env)
+    }
+
+    /// Returns the amount raised for each accepted asset.
+    /// No auth required.
+    pub fn get_raised_per_asset(env: Env) -> Vec<(AssetInfo, i128)> {
+        let campaign = get_campaign_or_panic(&env);
+        let mut result = Vec::new(&env);
+
+        for asset in campaign.accepted_assets.iter() {
+            let asset_info = if asset.is_xlm() {
+                AssetInfo::Native
+            } else {
+                AssetInfo::Stellar(asset.issuer.clone().unwrap())
+            };
+            let token_address = get_token_address_for_asset(&env, &asset_info, &campaign);
+            let amount = storage_get_asset_raised(&env, &token_address);
+            result.push_back((asset_info, amount));
+        }
+        result
     }
 
     /// Issue #196 – Returns the donor record for the given address.
@@ -506,6 +529,70 @@ impl CampaignContract {
         let timestamp = env.ledger().timestamp();
         event::contract_upgraded(&env, &campaign.creator, new_wasm_hash, timestamp);
     }
+}
+
+/// Find the token contract address for a given `AssetInfo`.
+/// For `AssetInfo::Native`, this function searches the `accepted_assets` list
+/// to find the wrapped XLM contract address.
+///
+/// # Panics
+/// - `Error::AssetNotAccepted` if the asset is not in the campaign's accepted list.
+fn get_token_address_for_asset(env: &Env, asset: &AssetInfo, campaign: &CampaignData) -> Address {
+    match asset {
+        AssetInfo::Stellar(addr) => {
+            // Ensure the provided address is one of the accepted assets
+            if !campaign.accepted_assets.iter().any(|a| a.issuer.as_ref() == Some(addr)) {
+                panic_with_error!(env, Error::AssetNotAccepted);
+            }
+            addr.clone()
+        }
+        AssetInfo::Native => {
+            // Find the XLM asset in the accepted list to get its wrapped address
+            campaign.accepted_assets.iter()
+                .find(|a| a.is_xlm())
+                .and_then(|a| a.issuer.clone())
+                .unwrap_or_else(|| panic_with_error!(env, Error::AssetNotAccepted))
+        }
+    }
+}
+
+/// Resolve the asset code (e.g., "USDC") from an `AssetInfo` enum.
+/// This requires searching the `accepted_assets` list.
+fn resolve_asset_code(env: &Env, asset_info: &AssetInfo, campaign: &CampaignData) -> String {
+    let target_issuer = get_token_address_for_asset(env, asset_info, campaign);
+    campaign.accepted_assets.iter()
+        .find(|asset| asset.issuer.as_ref() == Some(&target_issuer))
+        .map(|asset| asset.asset_code.clone())
+        .unwrap_or_else(|| String::from_slice(env, "Unknown")) // Should be unreachable
+}
+
+
+/// Validate that each `StellarAsset` in the list has a valid, non-empty code.
+fn validate_assets(env: &Env, assets: &Vec<StellarAsset>) -> Result<(), Error> {
+    for asset in assets.iter() {
+        if !asset.has_valid_code() {
+            return Err(Error::InvalidAssetCode);
+        }
+    }
+    Ok(())
+}
+
+/// Validate that milestones are sorted by `target_amount` in strictly
+/// ascending order, and that the final milestone's target equals the campaign goal.
+fn validate_milestones(env: &Env, milestones: &Vec<MilestoneData>, goal_amount: i128) -> Result<(), Error> {
+    let mut last_target = 0;
+    for (i, milestone) in milestones.iter().enumerate() {
+        if milestone.target_amount <= last_target {
+            return Err(Error::InvalidMilestones);
+        }
+        last_target = milestone.target_amount;
+
+        if i == milestones.len() - 1 && milestone.target_amount != goal_amount {
+            return Err(Error::MilestoneMismatch);
+        }
+    }
+    Ok(())
+}
 
     /// Issue #246 – Freeze the contract, blocking all mutating operations.
     ///
