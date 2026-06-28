@@ -2,6 +2,8 @@
 
 use soroban_sdk::{contract, contractclient, contractimpl, contracttype, Address, BytesN, Env, Symbol, Vec};
 use shared::types::{Campaign, CampaignStatus, Donation};
+use shared::pause;
+use shared::types::Donation;
 
 #[contractclient(name = "CampaignContractClient")]
 trait CampaignContractTrait {
@@ -52,7 +54,20 @@ impl DonationContract {
         env.storage().instance().set(&DataKey::Initialized, &true);
     }
 
+    pub fn pause(env: Env, admin: Address) {
+        admin.require_auth();
+        Self::ensure_admin(&env, &admin);
+        pause::pause(&env, &admin);
+    }
+
+    pub fn unpause(env: Env, admin: Address) {
+        admin.require_auth();
+        Self::ensure_admin(&env, &admin);
+        pause::unpause(&env, &admin);
+    }
+
     pub fn donate(env: Env, donor: Address, campaign_id: u64, amount: i128) {
+        pause::require_not_paused(&env);
         donor.require_auth();
         if amount <= 0 {
             panic!("amount must be positive");
@@ -163,5 +178,28 @@ mod test {
         let history = client.get_donor_history(&donor);
         assert_eq!(history.len(), 1);
         assert_eq!(history.get(0).unwrap().amount, 100_i128);
+    }
+
+    #[test]
+    fn pause_blocks_donations() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, DonationContract);
+        let client = DonationContractClient::new(&env, &contract_id);
+        let donor = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let campaign_contract = Address::generate(&env);
+
+        client.initialize(&admin, &campaign_contract);
+        client.pause(&admin);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.donate(&donor, &7_u64, &100_i128);
+        }));
+        assert!(result.is_err());
+
+        client.unpause(&admin);
+        client.donate(&donor, &7_u64, &100_i128);
+        assert_eq!(client.get_total_raised(&7_u64), 100_i128);
     }
 }

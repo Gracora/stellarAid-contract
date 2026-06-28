@@ -1,6 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, String, Symbol};
+use shared::pause;
 use shared::types::{Campaign, CampaignStatus};
 
 #[contracttype]
@@ -44,6 +45,20 @@ impl CampaignContract {
     }
 
     pub fn register_campaign(env: Env, owner: Address, goal: i128, deadline: u64) -> u64 {
+    pub fn pause(env: Env, admin: Address) {
+        admin.require_auth();
+        Self::ensure_admin(&env, &admin);
+        pause::pause(&env, &admin);
+    }
+
+    pub fn unpause(env: Env, admin: Address) {
+        admin.require_auth();
+        Self::ensure_admin(&env, &admin);
+        pause::unpause(&env, &admin);
+    }
+
+    pub fn create_campaign(env: Env, owner: Address, goal: i128, deadline: u64) -> u64 {
+        pause::require_not_paused(&env);
         owner.require_auth();
         let id = Self::next_campaign_id(&env);
         let campaign = Campaign {
@@ -85,6 +100,7 @@ impl CampaignContract {
     }
 
     pub fn update_raised(env: Env, campaign_id: u64, amount: i128) {
+        pause::require_not_paused(&env);
         let mut campaign = env
             .storage()
             .persistent()
@@ -100,6 +116,21 @@ impl CampaignContract {
 
     pub fn reject_campaign(env: Env, admin: Address, campaign_id: u64, reason: String) {
         Self::update_campaign_status(env, admin, campaign_id, CampaignStatus::Rejected);
+        pause::require_not_paused(&env);
+        admin.require_auth();
+        Self::ensure_admin(&env, &admin);
+        let mut campaign = Self::get_campaign(env.clone(), campaign_id).unwrap();
+        campaign.status = CampaignStatus::Active;
+        env.storage().persistent().set(&DataKey::Campaign(campaign_id), &campaign);
+    }
+
+    pub fn reject_campaign(env: Env, admin: Address, campaign_id: u64, reason: String) {
+        pause::require_not_paused(&env);
+        admin.require_auth();
+        Self::ensure_admin(&env, &admin);
+        let mut campaign = Self::get_campaign(env.clone(), campaign_id).unwrap();
+        campaign.status = CampaignStatus::Rejected;
+        env.storage().persistent().set(&DataKey::Campaign(campaign_id), &campaign);
         let _ = reason;
     }
 
@@ -109,9 +140,16 @@ impl CampaignContract {
 
     pub fn get_campaign_count(env: Env) -> u64 {
         env.storage().instance().get(&DataKey::CampaignCount).unwrap_or(0_u64)
+        pause::require_not_paused(&env);
+        admin.require_auth();
+        Self::ensure_admin(&env, &admin);
+        let mut campaign = Self::get_campaign(env.clone(), campaign_id).unwrap();
+        campaign.status = CampaignStatus::Suspended;
+        env.storage().persistent().set(&DataKey::Campaign(campaign_id), &campaign);
     }
 
     pub fn transfer_admin(env: Env, current_admin: Address, new_admin: Address) {
+        pause::require_not_paused(&env);
         current_admin.require_auth();
         Self::ensure_admin(&env, &current_admin);
         env.storage().instance().set(&DataKey::Admin, &new_admin);
@@ -168,5 +206,27 @@ mod test {
         client.reject_campaign(&admin, &campaign_id, &String::from_str(&env, "spam"));
         let rejected = client.get_campaign(&campaign_id).unwrap();
         assert_eq!(rejected.status, CampaignStatus::Rejected);
+    }
+
+    #[test]
+    fn pause_blocks_state_mutations() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CampaignContract);
+        let client = CampaignContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let owner = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.pause(&admin);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.create_campaign(&owner, &1_000_i128, &2_000_u64);
+        }));
+        assert!(result.is_err());
+
+        client.unpause(&admin);
+        let campaign_id = client.create_campaign(&owner, &1_000_i128, &2_000_u64);
+        assert_eq!(campaign_id, 1);
     }
 }

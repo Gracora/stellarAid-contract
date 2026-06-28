@@ -4,4 +4,5 @@ pub mod horizon;
 pub mod logging;
 pub mod setup;
 pub mod soroban;
+pub mod transaction_builder;
 pub mod utils;
