@@ -13,14 +13,14 @@ pub enum RpcError {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct SimulationResult {
+pub struct ServerResult {
     pub cost: Option<serde_json::Value>,
     pub results: Option<Vec<serde_json::Value>>,
     pub error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct SendResult {
+pub struct ServerResult {
     pub hash: String,
     pub status: String,
 }
