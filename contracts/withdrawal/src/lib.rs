@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractclient, contractimpl, contracttype, Address, BytesN, Env, String, Symbol, Vec};
+use soroban_sdk::{contract, contractclient, contractimpl, contracttype, token, Address, BytesN, Env, String, Symbol, Vec};
 use shared::pause;
 use shared::types::Withdrawal;
 
@@ -101,7 +101,7 @@ impl WithdrawalContract {
 
     /// Approve a withdrawal request. Checks that the available balance
     /// (total raised minus already withdrawn) covers the requested amount.
-    pub fn approve_withdrawal(env: Env, withdrawal_id: u64, admin: Address) {
+    pub fn approve_withdrawal(env: Env, withdrawal_id: u64, admin: Address, token: Address) {
         pause::require_not_paused(&env);
         admin.require_auth();
         Self::ensure_admin(&env, &admin);
@@ -120,11 +120,18 @@ impl WithdrawalContract {
             panic!("insufficient funds: requested exceeds available balance");
         }
 
+        let token_client = token::Client::new(&env, &token);
+        if token_client.balance(&env.current_contract_address()) < withdrawal.amount {
+            panic!("insufficient funds: contract balance is lower than requested amount");
+        }
+
         let mut updated = withdrawal.clone();
         updated.approved = true;
         env.storage().persistent().set(&DataKey::Withdrawal(withdrawal_id), &updated);
 
         env.storage().persistent().set(&DataKey::WithdrawnAmount(campaign_id), &(already_withdrawn + withdrawal.amount));
+
+        token_client.transfer(&env.current_contract_address(), &withdrawal.recipient, &withdrawal.amount);
 
         let tx_hash = BytesN::from_array(&env, &[0u8; 32]);
         env.events().publish((Symbol::new(&env, "withdrawal_approved"),), WithdrawalApprovedEvent { withdrawal_id, tx_hash });

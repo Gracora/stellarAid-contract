@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractclient, contractimpl, contracttype, Address, BytesN, Env, String, Symbol, Vec};
+use soroban_sdk::{contract, contractclient, contractimpl, contracttype, token, Address, BytesN, Env, String, Symbol, Vec};
 use shared::types::{Campaign, CampaignStatus, Donation, DonationRefundedEvent, AnonymousDonationEvent};
 use shared::pause;
 
@@ -65,7 +65,7 @@ impl DonationContract {
         donor: Address,
         campaign_id: u64,
         amount: i128,
-        token_address: Option<Address>,
+        token: Address,
         anonymous: bool,
         memo: Option<String>,
     ) {
@@ -84,6 +84,9 @@ impl DonationContract {
             panic!("campaign is not active");
         }
 
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&donor, &env.current_contract_address(), &amount);
+
         let effective_donor = if anonymous {
             Address::generate(&env)
         } else {
@@ -98,7 +101,7 @@ impl DonationContract {
             timestamp,
             memo: memo.clone(),
             anonymous,
-            token_address: token_address.clone(),
+            token_address: Some(token),
         };
 
         let mut donations = env.storage().persistent().get(&DataKey::CampaignDonations(campaign_id)).unwrap_or(Vec::new(&env));
@@ -138,7 +141,7 @@ impl DonationContract {
 
     /// Issue a refund to a donor for a specific campaign.
     /// Only the admin or the campaign owner can authorize refunds.
-    pub fn refund(env: Env, caller: Address, campaign_id: u64, donor: Address, amount: i128) {
+    pub fn refund(env: Env, caller: Address, campaign_id: u64, donor: Address, amount: i128, token: Address) {
         caller.require_auth();
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         let campaign_contract: Address = env.storage().instance().get(&DataKey::CampaignContract).unwrap();
@@ -157,9 +160,8 @@ impl DonationContract {
         }
         env.storage().persistent().set(&DataKey::CampaignRaised(campaign_id), &(total - amount));
 
-        let mut donations: Vec<Donation> = env.storage().persistent().get(&DataKey::CampaignDonations(campaign_id)).unwrap_or(Vec::new(&env));
-        let filtered: Vec<Donation> = donations.iter().filter(|d| d.donor != donor || d.amount != amount).collect();
-        env.storage().persistent().set(&DataKey::CampaignDonations(campaign_id), &filtered);
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&env.current_contract_address(), &donor, &amount);
 
         env.events().publish(
             (Symbol::new(&env, "donation_refunded"),),
